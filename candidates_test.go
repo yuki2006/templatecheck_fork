@@ -18,6 +18,7 @@ import (
 	"errors"
 	htmpl "html/template"
 	"testing"
+	ttmpl "text/template"
 	"time"
 )
 
@@ -165,5 +166,40 @@ func TestCandidateFieldNames(t *testing.T) {
 	var e *Error
 	if err := CheckHTMLWithCandidates(bad, map[string]any{}, []any{candProblem{}, FieldNames{"Problem"}}); !errors.As(err, &e) || e.Subject != "Titel" {
 		t.Fatalf("got %v, want an error about Titel", err)
+	}
+}
+
+// The entry types of the data map describe the data only, not nested maps of the
+// same type (reported by another user of this fork). They do apply to "$" and to
+// templates invoked with ".".
+func TestDataMapEntryTypesOnlyForTheData(t *testing.T) {
+	data := map[string]any{"user": struct{ Name string }{}, "inner": map[string]any{}}
+	for _, test := range []struct {
+		tmpl    string
+		wantErr bool
+	}{
+		{`{{.inner.user.Anything}}`, false},
+		{`{{with .inner}}{{.user.Anything}}{{end}}`, false},
+		{`{{range $k, $v := .inner}}{{$v}}{{end}}{{.user.Name}}`, false},
+		{`{{index . "user"}}`, false},
+		// The data itself, and its keys, can be passed to functions that take the data's type and strings.
+		{`{{takesData .}}`, false},
+		{`{{range $k, $v := .}}{{takesString $k}}{{end}}`, false},
+		{`{{.user.Name}}`, false},
+		{`{{$.user.Name}}`, false},
+		{`{{define "p"}}{{.user.Name}}{{end}}{{template "p" .}}`, false},
+		{`{{.user.Nmae}}`, true},
+		{`{{$.user.Nmae}}`, true},
+		{`{{define "p"}}{{.user.Nmae}}{{end}}{{template "p" .}}`, true},
+	} {
+		funcs := ttmpl.FuncMap{
+			"takesData":   func(map[string]any) string { return "" },
+			"takesString": func(string) string { return "" },
+		}
+		tm := ttmpl.Must(ttmpl.New("t").Funcs(funcs).Parse(test.tmpl))
+		err := CheckText(tm, data)
+		if test.wantErr != (err != nil) {
+			t.Errorf("%s: got %v, want error %v", test.tmpl, err, test.wantErr)
+		}
 	}
 }

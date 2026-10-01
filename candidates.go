@@ -264,3 +264,10 @@ func kindOf(t reflect.Type) reflect.Kind {
 	}
 	return t.Kind()
 }
+
+// topDataKey is the key type of the type that stands for the data when it is a
+// map with typed entries (see check). Using a type of its own keeps the entry
+// types from being applied to other maps of the same type.
+type topDataKey string
+
+var topDataKeyType = reflect.TypeOf(topDataKey(""))

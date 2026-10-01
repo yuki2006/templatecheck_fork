@@ -163,7 +163,8 @@ type state struct {
 	onlyTruthMatters bool                    // see checkAndOr
 	final            reflect.Type            // type of the value piped into the call being checked by a checkArgs function, or nil
 	universe         *universe               // candidate types; nil if not used (see candidates.go)
-	dotType          reflect.Type            // type of the data, with pointers removed
+	dotType          reflect.Type            // type standing for the data when dotKeyTypes is set (see check)
+	origDotType      reflect.Type            // the real type of the data, when dotType is set
 	dotKeyTypes      map[string]reflect.Type // types of the entries of the data, if it is a map (see check)
 	candSets         [][]reflect.Type        // sets of candidate types, indexed by the length of their array type
 }
@@ -229,8 +230,13 @@ func check(t template, dot any, strict bool, u *universe) (err error) {
 	// If the data is a map with string keys, the types of its non-nil entries
 	// are used for the keys, as in map[string]any{"user": (*User)(nil)}.
 	// Other keys have the element type of the map.
+	//
+	// The entries describe this data only, not other maps of the same type
+	// (such as .inner in map[string]any{"inner": map[string]any{}}). So the
+	// data gets a type of its own, a map whose key type is topDataKey, and the
+	// entry types are used only for that type. It is passed along to templates
+	// invoked with "." and to "$", but a nested map has its ordinary type.
 	if dot != nil {
-		s.dotType = indirectType(dotType)
 		if v := reflect.Indirect(reflect.ValueOf(dot)); v.Kind() == reflect.Map && v.Type().Key().Kind() == reflect.String {
 			iter := v.MapRange()
 			for iter.Next() {
@@ -244,6 +250,12 @@ func check(t template, dot any, strict bool, u *universe) (err error) {
 					}
 					s.dotKeyTypes[iter.Key().String()] = e.Type()
 				}
+			}
+			if s.dotKeyTypes != nil {
+				s.origDotType = v.Type()
+				dotType = reflect.MapOf(topDataKeyType, v.Type().Elem())
+				s.dotType = dotType
+				s.vars[0].typ = dotType
 			}
 		}
 	}
@@ -688,7 +700,7 @@ func (s *state) evalField(dot reflect.Type, fieldName string, node parse.Node, a
 		}
 	case reflect.Map:
 		// If it's a map, attempt to use the field name as a key.
-		if stringType.AssignableTo(receiver.Key()) {
+		if stringType.AssignableTo(receiver.Key()) || receiver.Key() == topDataKeyType {
 			if hasArgs {
 				s.errorKindf(ErrFieldHasArgs, fieldName, "%s is not a method but has arguments", fieldName)
 			}
@@ -793,6 +805,14 @@ func (s *state) evalCall(dot reflect.Type, fi *funcInfo, node parse.Node, name s
 func (s *state) validateType(argType, formalType reflect.Type) {
 	if formalType == nil || formalType == unknownType {
 		s.errorf("internal error: bad formalType %v", formalType)
+	}
+	// The type standing for the data map, and its keys, are really the data's
+	// own type and strings (see check), as in {{set . "k" "v"}}.
+	if argType != nil && argType == s.dotType {
+		argType = s.origDotType
+	}
+	if argType == topDataKeyType {
+		argType = stringType
 	}
 	if !s.strict {
 		// If we don't know the argument type, assume we can assign.

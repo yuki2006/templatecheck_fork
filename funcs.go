@@ -119,6 +119,10 @@ func checkIndexArg(s *state, typ reflect.Type) {
 }
 
 func checkMapArg(s *state, indexType, keyType reflect.Type) {
+	if keyType == topDataKeyType {
+		// The data map (see check); its keys are really strings.
+		keyType = stringType
+	}
 	if indexType == nil {
 		if !canBeNil(keyType) {
 			s.errorKindf(ErrIndex, "", "value is nil; should be of type %s", typeString(keyType))
@@ -275,6 +279,10 @@ func checkNot(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 func typeString(t reflect.Type) string {
 	if t == nil {
 		return "untyped nil"
+	}
+	if t.Kind() == reflect.Map && t.Key() == topDataKeyType {
+		// The data map (see check); show it with its real key type.
+		return "map[string]" + typeString(t.Elem())
 	}
 	return t.String()
 }
