@@ -34,7 +34,7 @@ func NewChecked[T any, M tmpl[M]](t M) (*CheckedTemplate[T], error) {
 	}
 	ct := makeTemplate[M](c)
 	var z T
-	if err := check(ct, z, true); err != nil {
+	if err := check(ct, z, true, nil); err != nil {
 		return nil, err
 	}
 	return &CheckedTemplate[T]{ct}, nil

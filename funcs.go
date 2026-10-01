@@ -13,6 +13,10 @@ import (
 // it returns the type of the result, which is always int.
 // The number of args has already been checked, so we know len(args) == 1.
 func checkLen(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
+	if len(args) == 0 {
+		// The argument is piped in ({{.X | len}}). Its type is s.final.
+		return intType
+	}
 	validateLen(s, dot, args[0])
 	return intType
 }
@@ -26,7 +30,7 @@ func validateLen(s *state, dot reflect.Type, arg parse.Node) {
 		return
 	}
 	argType = indirectType(argType)
-	if argType == unknownType {
+	if isUnknown(argType) {
 		if s.strict {
 			s.errorKindf(ErrLen, "", "len of unknown type")
 		} else {
@@ -46,6 +50,14 @@ func validateLen(s *state, dot reflect.Type, arg parse.Node) {
 }
 
 func checkIndex(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
+	if s.final != nil {
+		// The last argument is piped in. Check the other arguments, but don't
+		// try to work out the result.
+		for _, arg := range args {
+			s.evalArg(dot, arg, false)
+		}
+		return unknownType
+	}
 	item := args[0]
 	itemType, _ := s.evalArg(dot, item, false)
 	if itemType == nil {
@@ -54,6 +66,10 @@ func checkIndex(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 	for _, index := range args[1:] {
 		itemType = indirectType(itemType)
 		indexType, _ := s.evalArg(dot, index, false)
+		if !s.strict && (isUnknown(itemType) || itemType.Kind() == reflect.Interface) {
+			// We can't tell what an unknown or interface value holds.
+			return unknownType
+		}
 		switch itemType.Kind() {
 		case reflect.Array, reflect.Slice, reflect.String:
 			checkIndexArg(s, indexType)
@@ -119,6 +135,13 @@ func checkMapArg(s *state, indexType, keyType reflect.Type) {
 }
 
 func checkSlice(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
+	if s.final != nil {
+		// The last argument is piped in; see checkIndex.
+		for _, arg := range args {
+			s.evalArg(dot, arg, false)
+		}
+		return unknownType
+	}
 	item := args[0]
 	indexes := args[1:]
 	itemType, _ := s.evalArg(dot, item, false)
@@ -153,7 +176,11 @@ func checkSlice(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 // - Call the equivalent of indirectInterface.
 // - Use basicKind.
 func checkEq(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
-	if len(args) == 1 {
+	// The value piped in, as in {{.X | ne 0}}, is also an argument.
+	if s.final != nil && definitelyNotComparable(s.final) {
+		s.errorKindf(ErrComparison, "", "uncomparable type: %s", typeString(s.final))
+	}
+	if n := len(args); n == 1 && s.final == nil || n == 0 {
 		s.errorKindf(ErrComparison, "", "missing argument for comparison")
 	}
 	for _, arg := range args {
@@ -213,9 +240,18 @@ func isNilComparable(t reflect.Type) bool {
 // check le, gt, etc.
 func checkOrderedComparison(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 	for _, arg := range args {
-		if t, _ := s.evalArg(dot, arg, false); !isOrderable(t) {
+		t, _ := s.evalArg(dot, arg, false)
+		if !s.strict && t != nil && (isUnknown(t) || t.Kind() == reflect.Interface) {
+			// We can't tell what an unknown or interface value holds.
+			continue
+		}
+		if !isOrderable(t) {
 			s.errorKindf(ErrComparison, "", "cannot compare values of type %s", typeString(t))
 		}
+	}
+	// The value piped in, as in {{.X | gt 3}}, is also an argument.
+	if t := s.final; t != nil && !(!s.strict && (isUnknown(t) || t.Kind() == reflect.Interface)) && !isOrderable(t) {
+		s.errorKindf(ErrComparison, "", "cannot compare values of type %s", typeString(t))
 	}
 	return boolType
 }
