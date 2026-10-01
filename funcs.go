@@ -75,7 +75,11 @@ func checkIndex(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 // In strict mode, all must have the same type.
 func checkAndOr(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 	if !s.strict {
-		// Any number of args, of any types.
+		// Any number of args, of any types. Still check each arg, so that a
+		// misspelled field in {{if and .A .B}} is reported.
+		for _, arg := range args {
+			s.evalArg(dot, arg, s.onlyTruthMatters)
+		}
 		return reflectValueType
 	}
 	// All args must have the same type.
@@ -224,7 +228,11 @@ func isOrderable(t reflect.Type) bool {
 }
 
 func checkNot(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
-	// Any type is OK.
+	// Any type is OK, but the arg must still be checked, so that a misspelled
+	// field in {{if not .A}} is reported.
+	for _, arg := range args {
+		s.evalArg(dot, arg, true)
+	}
 	return boolType
 }
 

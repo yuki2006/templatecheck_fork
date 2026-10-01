@@ -81,3 +81,28 @@ func TestErrorMessage(t *testing.T) {
 		t.Errorf("got %v, want %q", err, want)
 	}
 }
+
+// Fields in the args of not, and and or are checked.
+func TestBuiltinArgsAreChecked(t *testing.T) {
+	type S struct{ A, B bool }
+	for _, contents := range []string{
+		"{{if not .X}}{{end}}",
+		"{{if and .A .X}}{{end}}",
+		"{{if or .X .B}}{{end}}",
+		"{{if and .A (not .X)}}{{end}}",
+		"{{if .A}}{{else if and .A (not .X)}}{{end}}",
+	} {
+		t.Run(contents, func(t *testing.T) {
+			tmpl := ttmpl.Must(ttmpl.New("t").Parse(contents))
+			var e *Error
+			if err := CheckText(tmpl, S{}); !errors.As(err, &e) || e.Kind != ErrFieldNotFound || e.Subject != "X" {
+				t.Errorf("got %v, want ErrFieldNotFound for X", err)
+			}
+		})
+	}
+	// Correct fields still pass.
+	tmpl := ttmpl.Must(ttmpl.New("t").Parse("{{if and .A (not .B)}}{{end}}{{if or .A .B}}{{end}}{{if not .A}}{{end}}"))
+	if err := CheckText(tmpl, S{}); err != nil {
+		t.Errorf("got %v, want nil", err)
+	}
+}
