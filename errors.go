@@ -63,6 +63,9 @@ const (
 	ErrComparison
 	// ErrIncompleteTemplate: the template is incomplete or empty. Subject is the template name.
 	ErrIncompleteTemplate
+	// ErrNoCandidateType: with candidate types (CheckHTMLWithCandidates), no candidate
+	// type of a value of unknown type has the field or method. Subject is its name.
+	ErrNoCandidateType
 )
 
 // Error is the type of the errors returned by the Check functions.

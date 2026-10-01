@@ -38,3 +38,23 @@ if err := templatecheck.CheckHTML(t, homePage{}); err != nil {
 
 See the [package documentation](https://pkg.go.dev/github.com/jba/templatecheck)
 for details.
+
+Using candidate types (`CheckHTMLWithCandidates`):
+
+When the data is loosely typed, as with `map[string]any`, ordinary checking
+cannot see what `.user` is, so `{{.user.Nmae}}` is accepted. With candidate
+types, a field access on a value of unknown type is accepted only if some
+candidate type has that field or method, and the possible result types are
+carried along the chain:
+
+```
+data := map[string]any{"flash": map[string]string(nil)} // entries give the types of their keys
+candidates := []any{(*User)(nil), (*Problem)(nil), templatecheck.FieldNames{"HasAC"}}
+if err := templatecheck.CheckHTMLWithCandidates(t, data, candidates); err != nil {
+    // e.g. no candidate type has field or method "Nmae" (Kind ErrNoCandidateType)
+}
+```
+
+This is a minimal check: candidate types are only used to check that fields
+and methods exist. `FieldNames` accepts field names of types that cannot be
+named, such as struct types declared inside a function.

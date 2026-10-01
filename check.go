@@ -36,7 +36,7 @@ type template interface {
 // element type. This is not the default value for "missingkey", but it allows
 // more checks.
 func CheckHTML(t *htmpl.Template, typeValue any) error {
-	return check(htmlTemplate{t}, typeValue, false)
+	return check(htmlTemplate{t}, typeValue, false, nil)
 }
 
 // CheckHTMLStrict checks an html/template for problems. The second argument is the
@@ -60,7 +60,7 @@ func CheckHTML(t *htmpl.Template, typeValue any) error {
 //     must be of the same type. That restriction does not apply if they are used
 //     as an argument to "if", where only the truth value of the result matters.
 func CheckHTMLStrict(t *htmpl.Template, typeValue any) error {
-	return check(htmlTemplate{t}, typeValue, true)
+	return check(htmlTemplate{t}, typeValue, true, nil)
 }
 
 type htmlTemplate struct {
@@ -87,12 +87,12 @@ func (t htmlTemplate) Execute(w io.Writer, data any) error {
 
 // CheckText checks a text/template for problems. See CheckHTML for details.
 func CheckText(t *ttmpl.Template, typeValue any) error {
-	return check(textTemplate{t}, typeValue, false)
+	return check(textTemplate{t}, typeValue, false, nil)
 }
 
 // CheckTextStrict does strict checking. See [CheckHTMLStrict] for details.
 func CheckTextStrict(t *ttmpl.Template, typeValue any) error {
-	return check(textTemplate{t}, typeValue, true)
+	return check(textTemplate{t}, typeValue, true, nil)
 }
 
 type textTemplate struct {
@@ -123,12 +123,12 @@ func textFuncMap(textTmplPtr reflect.Value) reflect.Value {
 
 // CheckSafe checks a github.com/google/safehtml/template for problems. See [CheckHTML] for details.
 func CheckSafe(t *stmpl.Template, typeValue any) error {
-	return check(safeTemplate{t}, typeValue, false)
+	return check(safeTemplate{t}, typeValue, false, nil)
 }
 
 // CheckSafeStrict does strict checking. See [CheckHTMLStrict] for details.
 func CheckSafeStrict(t *stmpl.Template, typeValue any) error {
-	return check(safeTemplate{t}, typeValue, true)
+	return check(safeTemplate{t}, typeValue, true, nil)
 }
 
 type safeTemplate struct {
@@ -161,6 +161,12 @@ type state struct {
 	tmplType         map[string]reflect.Type // dot types for associated templates (strict mode only)
 	strict           bool                    // Ensure no type errors at exec time.
 	onlyTruthMatters bool                    // see checkAndOr
+	final            reflect.Type            // type of the value piped into the call being checked by a checkArgs function, or nil
+	universe         *universe               // candidate types; nil if not used (see candidates.go)
+	dotType          reflect.Type            // type standing for the data when dotKeyTypes is set (see check)
+	origDotType      reflect.Type            // the real type of the data, when dotType is set
+	dotKeyTypes      map[string]reflect.Type // types of the entries of the data, if it is a map (see check)
+	candSets         [][]reflect.Type        // sets of candidate types, indexed by the length of their array type
 }
 
 type (
@@ -195,7 +201,7 @@ type checkError struct {
 // and other parts of the text/template implementation, and heavily modified.
 // Roughly speaking, the changes involved replacing reflect.Value with
 // reflect.Type.
-func check(t template, dot any, strict bool) (err error) {
+func check(t template, dot any, strict bool, u *universe) (err error) {
 	defer func() {
 		if e := recover(); e != nil {
 			if cerr, ok := e.(checkError); ok {
@@ -219,6 +225,39 @@ func check(t template, dot any, strict bool) (err error) {
 		tmplType:      map[string]reflect.Type{},
 		userFuncTypes: map[string]reflect.Type{},
 		strict:        strict,
+		universe:      u,
+	}
+	// If the data is a map with string keys, the types of its non-nil entries
+	// are used for the keys, as in map[string]any{"user": (*User)(nil)}.
+	// Other keys have the element type of the map.
+	//
+	// The entries describe this data only, not other maps of the same type
+	// (such as .inner in map[string]any{"inner": map[string]any{}}). So the
+	// data gets a type of its own, a map whose key type is topDataKey, and the
+	// entry types are used only for that type. It is passed along to templates
+	// invoked with "." and to "$", but a nested map has its ordinary type.
+	if dot != nil {
+		if v := reflect.Indirect(reflect.ValueOf(dot)); v.Kind() == reflect.Map && v.Type().Key().Kind() == reflect.String {
+			iter := v.MapRange()
+			for iter.Next() {
+				e := iter.Value()
+				if e.Kind() == reflect.Interface {
+					e = e.Elem()
+				}
+				if e.IsValid() {
+					if s.dotKeyTypes == nil {
+						s.dotKeyTypes = map[string]reflect.Type{}
+					}
+					s.dotKeyTypes[iter.Key().String()] = e.Type()
+				}
+			}
+			if s.dotKeyTypes != nil {
+				s.origDotType = v.Type()
+				dotType = reflect.MapOf(topDataKeyType, v.Type().Elem())
+				s.dotType = dotType
+				s.vars[0].typ = dotType
+			}
+		}
 	}
 	tree := t.Tree()
 	if tree == nil || tree.Root == nil {
@@ -344,10 +383,10 @@ func (s *state) walkRange(dot reflect.Type, r *parse.RangeNode) {
 	defer s.pop(origMark)
 	typ := indirectType(s.evalPipeline(dot, r.Pipe, false))
 
-	if typ == unknownType {
+	if isUnknown(typ) {
 		if s.strict {
 			s.errorKindf(ErrNotIterable, "", "range can't iterate over unknown type")
-		} else {
+		} else if s.universe == nil {
 			return
 		}
 	}
@@ -368,7 +407,19 @@ func (s *state) walkRange(dot reflect.Type, r *parse.RangeNode) {
 	}
 
 	var rangeVars, elseVars []variable
-	switch typ.Kind() {
+	if isUnknown(typ) {
+		// Only reached with candidate types (see above): check the body with
+		// the element types of the candidates, or an unknown element type.
+		elem := unknownType
+		if isCandidateSet(typ) {
+			elem = s.candidateElemType(typ)
+		}
+		rangeVars = checkBody(unknownType, elem)
+		typ = nil
+	}
+	switch kindOf(typ) {
+	case reflect.Invalid:
+		// Already handled above.
 	case reflect.Array, reflect.Slice:
 		rangeVars = checkBody(intType, typ.Elem())
 
@@ -384,9 +435,12 @@ func (s *state) walkRange(dot reflect.Type, r *parse.RangeNode) {
 	case reflect.Interface:
 		if s.strict {
 			s.errorKindf(ErrNotIterable, "", "range can't iterate over type %v", typ)
-		} else {
+		} else if s.universe == nil {
 			// We can't assume anything about an interface type.
 			return
+		} else {
+			// With candidate types, check the body with an unknown element type.
+			rangeVars = checkBody(unknownType, unknownType)
 		}
 	case reflect.Int:
 		if msg := checkLangVersion(runtime.Version(), "go1.22"); msg != "" {
@@ -589,7 +643,10 @@ func (s *state) evalFunction(dot reflect.Type, node *parse.IdentifierNode, cmd p
 }
 
 func (s *state) evalField(dot reflect.Type, fieldName string, node parse.Node, args []parse.Node, final, receiver reflect.Type) reflect.Type {
-	if receiver == unknownType {
+	if s.usesCandidates(receiver) {
+		return s.evalCandidateField(fieldName, receiver)
+	}
+	if isUnknown(receiver) {
 		if s.strict {
 			s.errorKindf(ErrFieldOfUnknownType, fieldName, "cannot access field %q of unknown type", fieldName)
 		} else {
@@ -643,9 +700,14 @@ func (s *state) evalField(dot reflect.Type, fieldName string, node parse.Node, a
 		}
 	case reflect.Map:
 		// If it's a map, attempt to use the field name as a key.
-		if stringType.AssignableTo(receiver.Key()) {
+		if stringType.AssignableTo(receiver.Key()) || receiver.Key() == topDataKeyType {
 			if hasArgs {
 				s.errorKindf(ErrFieldHasArgs, fieldName, "%s is not a method but has arguments", fieldName)
+			}
+			if receiver == s.dotType {
+				if t, ok := s.dotKeyTypes[fieldName]; ok {
+					return t
+				}
 			}
 			return receiver.Elem()
 		}
@@ -717,8 +779,10 @@ func (s *state) evalCall(dot reflect.Type, fi *funcInfo, node parse.Node, name s
 	// Call custom arg-checker if there is one.
 	if fi.checkArgs != nil {
 		// See checkAndOr for onlyTruthMatters.
-		defer func(b bool) { s.onlyTruthMatters = b }(s.onlyTruthMatters)
+		defer func(b bool, f reflect.Type) { s.onlyTruthMatters, s.final = b, f }(s.onlyTruthMatters, s.final)
 		s.onlyTruthMatters = onlyTruthMatters
+		// The value piped in, as in {{.X | ne 0}}, is the last argument.
+		s.final = final
 		return fi.checkArgs(s, dot, args)
 	}
 	// Args must be checked. Fixed args first.
@@ -742,9 +806,17 @@ func (s *state) validateType(argType, formalType reflect.Type) {
 	if formalType == nil || formalType == unknownType {
 		s.errorf("internal error: bad formalType %v", formalType)
 	}
+	// The type standing for the data map, and its keys, are really the data's
+	// own type and strings (see check), as in {{set . "k" "v"}}.
+	if argType != nil && argType == s.dotType {
+		argType = s.origDotType
+	}
+	if argType == topDataKeyType {
+		argType = stringType
+	}
 	if !s.strict {
 		// If we don't know the argument type, assume we can assign.
-		if argType == unknownType {
+		if isUnknown(argType) {
 			return
 		}
 		// If the argument is of interface type, we can't tell here whether the
