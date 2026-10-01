@@ -222,7 +222,7 @@ func check(t template, dot any, strict bool) (err error) {
 	}
 	tree := t.Tree()
 	if tree == nil || tree.Root == nil {
-		s.errorf("%q is an incomplete or empty template", t.Name())
+		s.errorKindf(ErrIncompleteTemplate, t.Name(), "%q is an incomplete or empty template", t.Name())
 	}
 
 	iter := t.FuncMap().MapRange()
@@ -346,7 +346,7 @@ func (s *state) walkRange(dot reflect.Type, r *parse.RangeNode) {
 
 	if typ == unknownType {
 		if s.strict {
-			s.errorf("range can't iterate over unknown type")
+			s.errorKindf(ErrNotIterable, "", "range can't iterate over unknown type")
 		} else {
 			return
 		}
@@ -377,26 +377,26 @@ func (s *state) walkRange(dot reflect.Type, r *parse.RangeNode) {
 
 	case reflect.Chan:
 		if typ.ChanDir() == reflect.SendDir {
-			s.errorf("range can't iterate over send-only channel %v", typ)
+			s.errorKindf(ErrNotIterable, "", "range can't iterate over send-only channel %v", typ)
 		}
 		rangeVars = checkBody(intType, typ.Elem())
 
 	case reflect.Interface:
 		if s.strict {
-			s.errorf("range can't iterate over type %v", typ)
+			s.errorKindf(ErrNotIterable, "", "range can't iterate over type %v", typ)
 		} else {
 			// We can't assume anything about an interface type.
 			return
 		}
 	case reflect.Int:
 		if msg := checkLangVersion(runtime.Version(), "go1.22"); msg != "" {
-			s.errorf("range can't iterate over type %v; %s", typ, msg)
+			s.errorKindf(ErrNotIterable, "", "range can't iterate over type %v; %s", typ, msg)
 		}
 		rangeVars = checkBody(intType, intType)
 
 	case reflect.Func:
 		if msg := checkLangVersion(runtime.Version(), "go1.23"); msg != "" {
-			s.errorf("range can't iterate over type %v; %s", typ, msg)
+			s.errorKindf(ErrNotIterable, "", "range can't iterate over type %v; %s", typ, msg)
 		}
 		t1, t2, ok := seqArgTypes(typ)
 		if !ok {
@@ -405,7 +405,7 @@ func (s *state) walkRange(dot reflect.Type, r *parse.RangeNode) {
 		rangeVars = checkBody(t1, t2)
 
 	default:
-		s.errorf("range can't iterate over type %v", typ)
+		s.errorKindf(ErrNotIterable, "", "range can't iterate over type %v", typ)
 	}
 	if r.ElseList != nil {
 		elseVars = s.walkCopy(dot, r.ElseList)
@@ -472,7 +472,7 @@ func (s *state) walkTemplate(dot reflect.Type, t *parse.TemplateNode) {
 	s.seen[t.Name] = true
 	tmpl := s.tmpl.Lookup(t.Name)
 	if tmpl == nil {
-		s.errorf("template %q not defined", t.Name)
+		s.errorKindf(ErrTemplateNotDefined, t.Name, "template %q not defined", t.Name)
 	}
 	// Variables declared by the pipeline persist.
 	dot = s.evalPipeline(dot, t.Pipe, false)
@@ -480,7 +480,7 @@ func (s *state) walkTemplate(dot reflect.Type, t *parse.TemplateNode) {
 		// All calls to the template must have the same type.
 		if tt, ok := s.tmplType[t.Name]; ok {
 			if dot != tt {
-				s.errorf("inconsistent types for template %s: %s and %s", t.Name, typeString(tt), typeString(dot))
+				s.errorKindf(ErrInconsistentTemplateTypes, t.Name, "inconsistent types for template %s: %s and %s", t.Name, typeString(tt), typeString(dot))
 			}
 			// The template argument types are the same, and we checked
 			// the body previously, so nothing more to do.
@@ -583,7 +583,7 @@ func (s *state) evalFunction(dot reflect.Type, node *parse.IdentifierNode, cmd p
 	name := node.Ident
 	fi := s.lookupFuncInfo(name)
 	if fi == nil {
-		s.errorf("%q is not a defined function", name)
+		s.errorKindf(ErrFunctionNotDefined, name, "%q is not a defined function", name)
 	}
 	return s.evalCall(dot, fi, cmd, name, args, final, onlyTruthMatters)
 }
@@ -591,10 +591,14 @@ func (s *state) evalFunction(dot reflect.Type, node *parse.IdentifierNode, cmd p
 func (s *state) evalField(dot reflect.Type, fieldName string, node parse.Node, args []parse.Node, final, receiver reflect.Type) reflect.Type {
 	if receiver == unknownType {
 		if s.strict {
-			s.errorf("cannot access field %q of unknown type", fieldName)
+			s.errorKindf(ErrFieldOfUnknownType, fieldName, "cannot access field %q of unknown type", fieldName)
 		} else {
 			return unknownType
 		}
+	}
+	if receiver == nil {
+		// The template was invoked without data, as in {{template "x"}}.
+		s.errorKindf(ErrNilData, fieldName, "can't use field %s on nil data", fieldName)
 	}
 	receiver = indirectType(receiver)
 	// Unless it's an interface, need to get to a value of type *T to guarantee
@@ -629,11 +633,11 @@ func (s *state) evalField(dot reflect.Type, fieldName string, node parse.Node, a
 		tField, ok := receiver.FieldByName(fieldName)
 		if ok {
 			if tField.PkgPath != "" { // field is unexported
-				s.errorf("%s is an unexported field of struct type %s", fieldName, receiver)
+				s.errorKindf(ErrUnexportedField, fieldName, "%s is an unexported field of struct type %s", fieldName, receiver)
 			}
 			// If it's a function, we must call it.
 			if hasArgs {
-				s.errorf("%s has arguments but cannot be invoked as function", fieldName)
+				s.errorKindf(ErrFieldHasArgs, fieldName, "%s has arguments but cannot be invoked as function", fieldName)
 			}
 			return tField.Type
 		}
@@ -641,7 +645,7 @@ func (s *state) evalField(dot reflect.Type, fieldName string, node parse.Node, a
 		// If it's a map, attempt to use the field name as a key.
 		if stringType.AssignableTo(receiver.Key()) {
 			if hasArgs {
-				s.errorf("%s is not a method but has arguments", fieldName)
+				s.errorKindf(ErrFieldHasArgs, fieldName, "%s is not a method but has arguments", fieldName)
 			}
 			return receiver.Elem()
 		}
@@ -649,14 +653,14 @@ func (s *state) evalField(dot reflect.Type, fieldName string, node parse.Node, a
 	case reflect.Interface:
 		// We can't assume anything about what's in an interface.
 		if s.strict {
-			s.errorf("cannot access field or map element of interface type %s", typeString(receiver))
+			s.errorKindf(ErrFieldOfInterface, fieldName, "cannot access field or map element of interface type %s", typeString(receiver))
 		} else {
 			return unknownType
 		}
 		// A reflect.Ptr case appears in the template interpreter, but can't
 		// happen here because indirectType never returns a Ptr.
 	}
-	s.errorf("can't use field %s in type %s", fieldName, receiver)
+	s.errorKindf(ErrFieldNotFound, fieldName, "can't use field %s in type %s", fieldName, receiver)
 	panic("not reached")
 }
 
@@ -705,10 +709,10 @@ func (s *state) evalCall(dot reflect.Type, fi *funcInfo, node parse.Node, name s
 	if fi.typ.IsVariadic() {
 		numFixed = fi.typ.NumIn() - 1 // last arg is the variadic one.
 		if numIn < numFixed {
-			s.errorf("wrong number of args for %s: want at least %d, got %d", name, fi.typ.NumIn()-1, len(args))
+			s.errorKindf(ErrWrongArgCount, name, "wrong number of args for %s: want at least %d, got %d", name, fi.typ.NumIn()-1, len(args))
 		}
 	} else if numIn != fi.typ.NumIn() {
-		s.errorf("wrong number of args for %s: want %d, got %d", name, fi.typ.NumIn(), numIn)
+		s.errorKindf(ErrWrongArgCount, name, "wrong number of args for %s: want %d, got %d", name, fi.typ.NumIn(), numIn)
 	}
 	// Call custom arg-checker if there is one.
 	if fi.checkArgs != nil {
@@ -769,7 +773,7 @@ func (s *state) validateType(argType, formalType reflect.Type) {
 	if pt := reflect.PtrTo(argType); pt.AssignableTo(formalType) {
 		return
 	}
-	s.errorf("wrong type: expected %s; found %s", formalType, argType)
+	s.errorKindf(ErrWrongArgType, "", "wrong type: expected %s; found %s", formalType, argType)
 }
 
 // evalArg evaluates n as a function argument. It returns the resulting type and
@@ -902,7 +906,7 @@ func (s *state) checkArg(dot, formalType reflect.Type, arg parse.Node) {
 
 func (s *state) wrongTypeErr(typ reflect.Type, n parse.Node) {
 	s.at(n)
-	s.errorf("wrong type: expected %s; found %s", typ, n)
+	s.errorKindf(ErrWrongArgType, "", "wrong type: expected %s; found %s", typ, n)
 }
 
 // canBeNil reports whether an untyped nil can be assigned to the type. See reflect.Zero.
@@ -1002,7 +1006,7 @@ func (s *state) setVar(name string, typ reflect.Type) {
 			return
 		}
 	}
-	s.errorf("undefined variable: %s", name)
+	s.errorKindf(ErrUndefinedVariable, name, "undefined variable: %s", name)
 }
 
 // setTopVar overwrites the top-nth variable on the stack. Used by range iterations.
@@ -1017,7 +1021,7 @@ func (s *state) varType(name string) reflect.Type {
 			return s.vars[i].typ
 		}
 	}
-	s.errorf("undefined variable: %s", name)
+	s.errorKindf(ErrUndefinedVariable, name, "undefined variable: %s", name)
 	return unknownType
 }
 
@@ -1026,22 +1030,9 @@ func (s *state) at(node parse.Node) {
 	s.node = node
 }
 
-// errorf records an ExecError and terminates processing.
+// errorf records an *Error of kind ErrOther and terminates processing.
 func (s *state) errorf(format string, args ...any) {
-	name := doublePercent(s.tmpl.Name())
-	if s.node == nil {
-		format = fmt.Sprintf("template: %s: %s", name, format)
-	} else {
-		location, context := s.tmpl.Tree().ErrorContext(s.node)
-		format = fmt.Sprintf("template: %s: checking %q at <%s>: %s", location, name, doublePercent(context), format)
-	}
-	panic(checkError{fmt.Errorf(format, args...)})
-}
-
-// doublePercent returns the string with %'s replaced by %%, if necessary,
-// so it can be used safely inside a Printf format string.
-func doublePercent(str string) string {
-	return strings.ReplaceAll(str, "%", "%%")
+	s.errorKindf(ErrOther, "", format, args...)
 }
 
 type funcInfo struct {

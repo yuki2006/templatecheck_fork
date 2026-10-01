@@ -21,14 +21,14 @@ func validateLen(s *state, dot reflect.Type, arg parse.Node) {
 	argType, isLiteral := s.evalArg(dot, arg, false)
 	if isLiteral {
 		if argType != stringType {
-			s.errorf("len of %s", arg)
+			s.errorKindf(ErrLen, "", "len of %s", arg)
 		}
 		return
 	}
 	argType = indirectType(argType)
 	if argType == unknownType {
 		if s.strict {
-			s.errorf("len of unknown type")
+			s.errorKindf(ErrLen, "", "len of unknown type")
 		} else {
 			return
 		}
@@ -38,10 +38,10 @@ func validateLen(s *state, dot reflect.Type, arg parse.Node) {
 	case reflect.Interface:
 		// We can't assume anything about an interface type.
 		if s.strict {
-			s.errorf("len of %s", typeString(argType))
+			s.errorKindf(ErrLen, "", "len of %s", typeString(argType))
 		}
 	default:
-		s.errorf("len of type %s", typeString(argType))
+		s.errorKindf(ErrLen, "", "len of type %s", typeString(argType))
 	}
 }
 
@@ -49,7 +49,7 @@ func checkIndex(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 	item := args[0]
 	itemType, _ := s.evalArg(dot, item, false)
 	if itemType == nil {
-		s.errorf("index of untyped nil")
+		s.errorKindf(ErrIndex, "", "index of untyped nil")
 	}
 	for _, index := range args[1:] {
 		itemType = indirectType(itemType)
@@ -66,7 +66,7 @@ func checkIndex(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 			checkMapArg(s, indexType, itemType.Key())
 			itemType = itemType.Elem()
 		default:
-			s.errorf("can't index item of type %s", typeString(itemType))
+			s.errorKindf(ErrIndex, "", "can't index item of type %s", typeString(itemType))
 		}
 	}
 	return itemType
@@ -91,17 +91,17 @@ func checkAndOr(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 
 func checkIndexArg(s *state, typ reflect.Type) {
 	if typ == nil {
-		s.errorf("cannot index slice/array with nil")
+		s.errorKindf(ErrIndex, "", "cannot index slice/array with nil")
 	}
 	if !(typ == intType || typ == numberType) {
-		s.errorf("cannot index slice/array with type %s", typ)
+		s.errorKindf(ErrIndex, "", "cannot index slice/array with type %s", typ)
 	}
 }
 
 func checkMapArg(s *state, indexType, keyType reflect.Type) {
 	if indexType == nil {
 		if !canBeNil(keyType) {
-			s.errorf("value is nil; should be of type %s", typeString(keyType))
+			s.errorKindf(ErrIndex, "", "value is nil; should be of type %s", typeString(keyType))
 		}
 		return
 	}
@@ -111,7 +111,7 @@ func checkMapArg(s *state, indexType, keyType reflect.Type) {
 	if isIntegerType(indexType) && isIntegerType(keyType) && indexType.ConvertibleTo(keyType) {
 		return
 	}
-	s.errorf("index has type %s; should be %s", typeString(indexType), typeString(keyType))
+	s.errorKindf(ErrIndex, "", "index has type %s; should be %s", typeString(indexType), typeString(keyType))
 }
 
 func checkSlice(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
@@ -119,16 +119,16 @@ func checkSlice(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 	indexes := args[1:]
 	itemType, _ := s.evalArg(dot, item, false)
 	if itemType == nil {
-		s.errorf("index of untyped nil")
+		s.errorKindf(ErrIndex, "", "index of untyped nil")
 	}
 	if len(indexes) > 3 {
-		s.errorf("too many slice indexes: %d", len(indexes))
+		s.errorKindf(ErrSlice, "", "too many slice indexes: %d", len(indexes))
 	}
 	var resultType reflect.Type
 	switch itemType.Kind() {
 	case reflect.String:
 		if len(indexes) == 3 {
-			s.errorf("cannot 3-index slice a string")
+			s.errorKindf(ErrSlice, "", "cannot 3-index slice a string")
 		}
 		resultType = itemType
 	case reflect.Array:
@@ -136,7 +136,7 @@ func checkSlice(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 	case reflect.Slice:
 		resultType = itemType
 	default:
-		s.errorf("can't slice item of type %s", typeString(itemType))
+		s.errorKindf(ErrSlice, "", "can't slice item of type %s", typeString(itemType))
 	}
 	for _, index := range indexes {
 		indexType, _ := s.evalArg(dot, index, false)
@@ -150,12 +150,12 @@ func checkSlice(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 // - Use basicKind.
 func checkEq(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 	if len(args) == 1 {
-		s.errorf("missing argument for comparison")
+		s.errorKindf(ErrComparison, "", "missing argument for comparison")
 	}
 	for _, arg := range args {
 		typ, _ := s.evalArg(dot, arg, false)
 		if definitelyNotComparable(typ) {
-			s.errorf("uncomparable type: %s", typeString(typ))
+			s.errorKindf(ErrComparison, "", "uncomparable type: %s", typeString(typ))
 		}
 	}
 	if s.strict {
@@ -163,7 +163,7 @@ func checkEq(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 		for _, arg := range args[1:] {
 			typ, _ := s.evalArg(dot, arg, false)
 			if !comparisonCompatible(typ0, typ) {
-				s.errorf("incompatible types for comparison: %s and %s", typeString(typ0), typeString(typ))
+				s.errorKindf(ErrComparison, "", "incompatible types for comparison: %s and %s", typeString(typ0), typeString(typ))
 			}
 		}
 	}
@@ -210,7 +210,7 @@ func isNilComparable(t reflect.Type) bool {
 func checkOrderedComparison(s *state, dot reflect.Type, args []parse.Node) reflect.Type {
 	for _, arg := range args {
 		if t, _ := s.evalArg(dot, arg, false); !isOrderable(t) {
-			s.errorf("cannot compare values of type %s", typeString(t))
+			s.errorKindf(ErrComparison, "", "cannot compare values of type %s", typeString(t))
 		}
 	}
 	return boolType
